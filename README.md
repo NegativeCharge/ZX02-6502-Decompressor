@@ -1,59 +1,141 @@
-# ZX0 6502 Decompressor Acorn BeebAsm Port
+# ZX02 6502 Optimized Decompressor Acorn BeebAsm Port
 
-This is a BeebAsm 6502 port of https://xxl.atari.pl/zx0-decompressor/
+This is a BeebAsm 6502 port of https://github.com/dmsc/zx02
 
-* [ZX0](https://github.com/einar-saukas/ZX0) - The official **ZX0** repository.
+This is a modified version of the [ZX0](https://github.com/einar-saukas/ZX0)
+and [ZX1](https://github.com/einar-saukas/ZX1) compressors to make the
+decompressor smaller and faster on a 6502.
 
-**ZX0** is an optimal data compressor for a custom
-[LZ77/LZSS](https://en.wikipedia.org/wiki/Lempel%E2%80%93Ziv%E2%80%93Storer%E2%80%93Szymanski)
-based compression format, that provides a tradeoff between high compression
-ratio, and extremely simple fast decompression. Therefore it's especially
-appropriate for low-end platforms, including 8-bit computers like the ZX
-Spectrum.
+The intended use is compressing data up to about 16kB, or where the
+decompressor size should be as small as possible.
 
-## File Format
+**The compression format is not compatible with ZX0**
 
-The **ZX0** compressed format is very simple. There are only 3 types of blocks:
+## Features
 
-* Literal (copy next N bytes from compressed file)
-```
-    0  Elias(length)  byte[1]  byte[2]  ...  byte[N]
-```
+Compared to ZX0, the differences are:
 
-* Copy from last offset (repeat N bytes from last offset)
-```
-    0  Elias(length)
-```
+* The Elias gamma codes are limited to 8 bits (from 1 to 256). This makes
+  decoding simpler and faster in the 6502, as all registers are 8-bit.
 
-* Copy from new offset (repeat N bytes from new offset)
-```
-    1  Elias(MSB(offset)+1)  LSB(offset)  Elias(length-1)
-```
+* Allowed to encode matches with 1 byte length. This is needed as the encoder
+  can't output more than 256 literal bytes, so at least one match is needed to
+  separate two literal runs. This has the added advantage of allowing new
+  match lengths for the repeated offset matches.
 
-**ZX0** needs only 1 bit to distinguish between these blocks, because literal
-blocks cannot be consecutive, and reusing last offset can only happen after a
-literal block. The first block is always a literal, so the first bit is omitted.
+* Offsets are stored as positive integers (minus one). This is faster in the
+  6502 because a SBC instruction can subtract one more than the value.
 
-The offset MSB and all lengths are stored using interlaced
-[Elias Gamma Coding](https://en.wikipedia.org/wiki/Elias_gamma_coding). When
-offset MSB equals 256 it means EOF. The offset LSB is stored using 7 bits 
-instead of 8, because it produces better results in most practical cases.
+* The Elias gamma codes are stored with a 0 bit at the end.
 
-## License
+* It is possible to start with any initial offset, the 6502 decoders included
+  assume initial offset 1, but changing it does not make the decoder bigger.
 
-The **ZX0** data compression format and algorithm was designed and implemented
-by **Einar Saukas**. Special thanks to **introspec/spke** for several
-suggestions and improvements, and together with **uniabis** for providing the
-"Fast" decompressor. Also special thanks to **Urusergi** for additional ideas
-and improvements.
+With the above changes, compared with the original `ZX02` have:
 
-The optimal C compressor is available under the "BSD-3" license. In practice,
-this is relevant only if you want to modify its source code and/or incorporate
-the compressor within your own products. Otherwise, if you just execute it to
-compress files, you can simply ignore these conditions.
+* Worst case expansion for random data is bigger than the original, 1.01% for
+  `ZX02` compared with 0.8% for `ZX0`
 
-The decompressors can be used freely within your own programs (either for the
-ZX Spectrum or any other platform), even for commercial releases. The only
-condition is that you must indicate somehow in your documentation that you have
-used **ZX0**.
+* Compression for long repeated runs is also lower, original can encode runs
+  of 1K with 4 bytes, we need 12 bytes.
 
+* Code and 16 bit data can compress a lot more than with the original, as it
+  is possible to change the offset at any place in the input.
+
+So, this compressor is better suited to smaller data, and specially when you
+need the de-compressor code to be as small as possible.
+
+In the `ZX1` mode, in addition to the changes above, the format also differs on
+how the offsets are stored:
+
+ * For offsets up to 127, the offset is stored as one byte, multiplied by 2.
+
+ * For offsets greater than 127, two bytes are stored, the first byte is the
+   high part of the offset (with the bit 0 set) and the second byte is the
+   low part of the offset.
+
+
+## 6502 decompressors
+
+There are three 6502 assembly decoders, all with ROM-able code and using 8
+bytes of zero-page:
+
+* Fast and small decoder, 138 bytes: [zx02-optim.asm](6502/zx02-optim.asm)
+  **This is the recommended decompressor for most users**
+* Smallest decoder, 130 bytes: [zx02-small.asm](6502/zx02-small.asm)
+* Faster decoder, 175 bytes: [zx02-fast.asm](6502/zx02-fast.asm)
+
+
+## C decompressor
+
+There is a C decompressor command `dzx02` that supports all variations of the
+format, including starting offsets and backward encode/decode.
+
+
+## Downloads
+
+You can download pre-compiled compressor and decompressor binaries in the
+[GitHub releases area](https://github.com/dmsc/zx02/releases/).
+
+
+## Compressor usage
+
+The compressor accepts the following options:
+
+### Standard Options
+
+* **-f**
+
+  Force overwrite of output file if it exists already.
+
+* **-q**
+
+  Use a quick non-optimal compression, useful during development to avoid
+  waiting for the compression of long files.
+
+* **-1**
+
+  Compress in the `ZX1` mode, this is a simple format that sacrifices about
+  1.5% compression but decodes faster.
+
+
+### Advanced Compression Options
+
+* **-p _n_**
+
+  Skip the first `n` bytes of the input file when compressing, but use it as a
+  *dictionary* for the following data. This is useful to make the compressed
+  file smaller if you have fixes data already in memory just before the data to
+  decompress.
+
+* **-o _n_**
+
+  Use `n` as starting offset. The standard decompressor uses the value `1` as
+  starting offset for matches - this is a good overall value, but certain files
+  could compress better with a different value - for example, 16 bit data could
+  benefit using a starting offset of `2`.
+
+  To decompress a file compressed with this option, you need to alter the
+  decompressor code, in the `zx0_ini_block` the first byte is the starting
+  offset minus 1.
+
+
+### Options incompatible with standard decompressor
+
+* **-b**
+
+  Compress *backwards*, from the end of the file to the start.  This needs a
+  decompressor that also reads the data from the end, would probably be bigger
+  and slower in 6502 assembly, so it is not supported in the ASM code.
+
+* **-s**
+
+  Use shorted Elias codes. This produces files that are very slightly smaller,
+  by limiting the Elias gamma code lengths - but the decompressor would be
+  bigger.
+
+* **-e**
+
+  Inverted Elias code end bit. This option changes the format so that a `1` bit
+  ends the Elias gamma codes - the default was chosen to make the 6502 decoder
+  one byte shorter.
